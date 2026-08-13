@@ -16,6 +16,53 @@ import current_user from 'pgadmin.user_management.current_user';
 import { isEmptyString } from 'sources/validators';
 import VariableSchema from './variable.ui';
 import { getRandomColor } from '../../../../../static/js/utils';
+import {
+  getCachedKubernetesResourcePorts,
+  getKubernetesContexts,
+  getKubernetesNamespaces,
+  getKubernetesResourcePorts,
+  getKubernetesResources,
+  getKubernetesSources,
+} from './kubernetes_options';
+
+const KUBERNETES_GROUP = gettext('Kubernetes');
+
+/* Both values name the very same local listener.  They differ in who can
+ * reach it: localhost keeps the forward private to this machine, while the
+ * Docker host name is reachable from containers on it. */
+const HOST_MODE_LOCALHOST = 'localhost';
+const HOST_MODE_DOCKER = 'host.docker.internal';
+
+const HOST_MODE_OPTIONS = [
+  {label: HOST_MODE_LOCALHOST, value: HOST_MODE_LOCALHOST},
+  {label: HOST_MODE_DOCKER, value: HOST_MODE_DOCKER},
+];
+
+const RESOURCE_KIND_OPTIONS = [
+  {label: gettext('Service'), value: 'service'},
+  {label: gettext('Pod'), value: 'pod'},
+];
+
+/* The four dropdowns narrow each other, so any change upstream invalidates
+ * everything below it. */
+const KUBERNETES_DOWNSTREAM_OF = {
+  k8s_context: [
+    'k8s_namespace', 'k8s_resource_name', 'k8s_username_ref',
+    'k8s_password_ref', 'k8s_database_ref',
+  ],
+  k8s_namespace: [
+    'k8s_resource_name', 'k8s_username_ref', 'k8s_password_ref',
+    'k8s_database_ref',
+  ],
+  k8s_resource_kind: ['k8s_resource_name'],
+};
+
+function clearFields(names) {
+  return names.reduce((cleared, name) => {
+    cleared[name] = null;
+    return cleared;
+  }, {});
+}
 
 class TagsSchema extends BaseUISchema {
   get idAttribute() { return 'old_text'; }
@@ -211,6 +258,14 @@ export default class ServerSchema extends BaseUISchema {
         {'name': 'sslmode', 'value': 'prefer', 'keyword': 'sslmode'},
         {'name': 'connect_timeout', 'value': 10, 'keyword': 'connect_timeout'}],
       tags: [],
+      kubernetes_conn: false,
+      k8s_context: undefined,
+      k8s_namespace: undefined,
+      k8s_resource_kind: 'service',
+      k8s_resource_name: undefined,
+      k8s_username_ref: undefined,
+      k8s_password_ref: undefined,
+      k8s_database_ref: undefined,
       ...initValues,
     });
 
@@ -218,7 +273,8 @@ export default class ServerSchema extends BaseUISchema {
     this.paramSchema = new VariableSchema(getConnectionParameters(), null, null, ['name', 'keyword', 'value']);
     this.tagsSchema = new TagsSchema();
     this.userId = userId;
-    _.bindAll(this, 'isShared');
+    _.bindAll(this, 'isShared', 'isKubernetes', 'isNotKubernetes',
+      'kubernetesReadOnly');
   }
 
   initialise(state) {
@@ -235,6 +291,38 @@ export default class ServerSchema extends BaseUISchema {
 
   isConnectedOrShared(state) {
     return this.isConnected(state) || this.isShared(state);
+  }
+
+  isKubernetes(state) {
+    return Boolean(state.kubernetes_conn);
+  }
+
+  isNotKubernetes(state) {
+    return !this.isKubernetes(state);
+  }
+
+  /* The Kubernetes dropdowns only mean anything once the switch is on, and
+   * the contract is pinned for as long as the server is connected. */
+  kubernetesReadOnly(state) {
+    return !this.isKubernetes(state) || this.isConnected(state);
+  }
+
+  /* Options for one of the cascading dropdowns, kept empty until every
+   * level above it has been answered. */
+  kubernetesOptions(state, fetch) {
+    return () => this.isKubernetes(state) ? fetch() : Promise.resolve([]);
+  }
+
+  /* Username, password and database are all picked the same way: as a
+   * <secret|configmap>/<name>/<key> reference from the chosen namespace. */
+  kubernetesSourceField(state) {
+    return {
+      type: 'select',
+      options: this.kubernetesOptions(state, () => getKubernetesSources(
+        state.k8s_context, state.k8s_namespace
+      )),
+      optionsReloadBasis: [state.k8s_context, state.k8s_namespace].join('/'),
+    };
   }
 
   get baseFields() {
@@ -290,12 +378,15 @@ export default class ServerSchema extends BaseUISchema {
       },
       {
         id: 'shared', label: gettext('Shared?'), type: 'switch',
-        mode: ['properties', 'create', 'edit'],
+        mode: ['properties', 'create', 'edit'], deps: ['kubernetes_conn'],
         readonly: function(state){
           let serverOwner = obj.userId;
           return !obj.isNew(state) && serverOwner != current_user.id;
-        }, visible: function(){
-          return current_user.is_admin && pgAdmin.server_mode == 'True';
+        }, visible: function(state){
+          /* Sharing a Kubernetes connection would lend every other user the
+           * cluster credentials it was registered with. */
+          return current_user.is_admin && pgAdmin.server_mode == 'True'
+            && !obj.isKubernetes(state);
         },
       },
       {
@@ -332,8 +423,23 @@ export default class ServerSchema extends BaseUISchema {
         id: 'connection_string', label: gettext('Connection String'), type: 'multiline',
         group: gettext('Connection'), mode: ['properties'], readonly: true,
       }, {
-        id: 'host', label: gettext('Host name/address'), type: 'text', group: gettext('Connection'),
+        id: 'host', label: gettext('Host name/address'), group: gettext('Connection'),
         mode: ['properties', 'edit', 'create'], disabled: obj.isShared,
+        deps: ['kubernetes_conn'],
+        /* A Kubernetes connection always reaches its port forward locally,
+         * so the only choice is which local name to reach it by. */
+        type: (state)=>{
+          if(!obj.isKubernetes(state)) {
+            return {type: 'text'};
+          }
+          return {
+            type: 'select',
+            options: HOST_MODE_OPTIONS,
+            controlProps: {allowClear: false},
+          };
+        },
+        helpMessage: gettext('Choose "%s" when something inside a Docker container has to reach the forwarded port; the listener is then bound on all interfaces rather than kept private to this machine.', HOST_MODE_DOCKER),
+        helpMessageMode: ['edit', 'create'],
         depChange: (state)=>{
           if(obj.origData.host != state.host && !obj.isNew(state) && state.connected){
             obj.informText = gettext(
@@ -345,8 +451,32 @@ export default class ServerSchema extends BaseUISchema {
         }
       },
       {
-        id: 'port', label: gettext('Port'), type: 'int', group: gettext('Connection'),
-        mode: ['properties', 'edit', 'create'], min: 1, max: 65535, disabled: obj.isShared,
+        id: 'port', label: gettext('Port'), group: gettext('Connection'),
+        mode: ['properties', 'edit', 'create'], disabled: obj.isShared,
+        deps: [
+          'kubernetes_conn', 'k8s_context', 'k8s_namespace',
+          'k8s_resource_kind', 'k8s_resource_name',
+        ],
+        /* In Kubernetes mode this is the port the service or pod exposes,
+         * not the forwarded local port - that one is picked from whatever
+         * is free and is never shown. */
+        type: (state)=>{
+          if(!obj.isKubernetes(state)) {
+            return {type: 'int', min: 1, max: 65535};
+          }
+          return {
+            type: 'select',
+            options: obj.kubernetesOptions(state, ()=>getKubernetesResourcePorts(
+              state.k8s_context, state.k8s_namespace,
+              state.k8s_resource_kind, state.k8s_resource_name
+            )),
+            optionsReloadBasis: [
+              state.k8s_context, state.k8s_namespace,
+              state.k8s_resource_kind, state.k8s_resource_name,
+            ].join('/'),
+            controlProps: {allowClear: false},
+          };
+        },
         depChange: (state)=>{
           if(obj.origData.port != state.port && !obj.isNew(state) && state.connected){
             obj.informText = gettext(
@@ -358,11 +488,16 @@ export default class ServerSchema extends BaseUISchema {
         }
       },{
         id: 'db', label: gettext('Maintenance database'), type: 'text', group: gettext('Connection'),
-        mode: ['properties', 'edit', 'create'], readonly: obj.isConnectedOrShared,
-        noEmpty: true,
+        mode: ['properties', 'edit', 'create'], deps: ['kubernetes_conn'],
+        readonly: (state)=>obj.isConnectedOrShared(state) || obj.isKubernetes(state),
+        /* A Kubernetes connection reads this from the cluster, so there is
+         * nothing to show until the server has been registered. */
+        visible: (state)=>!obj.isKubernetes(state) || !obj.isNew(state),
       },{
         id: 'username', label: gettext('Username'), type: 'text', group: gettext('Connection'),
-        mode: ['properties', 'edit', 'create'],
+        mode: ['properties', 'edit', 'create'], deps: ['kubernetes_conn'],
+        readonly: (state)=>obj.isKubernetes(state),
+        visible: (state)=>!obj.isKubernetes(state) || !obj.isNew(state),
         depChange: (state)=>{
           if(obj.origData.username != state.username && !obj.isNew(state) && state.connected){
             obj.informText = gettext(
@@ -375,6 +510,7 @@ export default class ServerSchema extends BaseUISchema {
       },{
         id: 'kerberos_conn', label: gettext('Kerberos authentication?'), type: 'switch',
         group: gettext('Connection'), disabled: obj.isShared,
+        deps: ['kubernetes_conn'], visible: obj.isNotKubernetes,
       },{
         id: 'gss_authenticated', label: gettext('GSS authenticated?'), type: 'switch',
         group: gettext('Connection'), mode: ['properties'], visible: obj.isConnected,
@@ -385,7 +521,7 @@ export default class ServerSchema extends BaseUISchema {
         id: 'password', label: gettext('Password'), type: 'password',
         group: gettext('Connection'),
         mode: ['create', 'edit'],
-        deps: ['kerberos_conn', 'save_password'],
+        deps: ['kerberos_conn', 'save_password', 'kubernetes_conn'],
         controlProps: {
           maxLength: null,
           autoComplete: 'new-password'
@@ -396,25 +532,168 @@ export default class ServerSchema extends BaseUISchema {
           return state.connected || !state.save_password;
         },
         disabled: function(state) {return state.kerberos_conn;},
+        /* Nothing to type or store: a Kubernetes connection reads its
+         * password from the cluster every time it connects. */
+        visible: obj.isNotKubernetes,
         helpMessage: gettext('In edit mode the password field is enabled only if Save Password is set to true.')
       },{
         id: 'save_password', label: gettext('Save password?'),
         type: 'switch', group: gettext('Connection'), mode: ['create', 'edit'],
-        deps: ['kerberos_conn'],
+        deps: ['kerberos_conn', 'kubernetes_conn'],
         readonly: function(state) {
           return state.connected;
         },
         disabled: function(state) {
           return !current_user.allow_save_password || state.kerberos_conn;
         },
+        visible: obj.isNotKubernetes,
       },{
         id: 'role', label: gettext('Role'), type: 'text', group: gettext('Connection'),
         mode: ['properties', 'edit', 'create'], readonly: obj.isConnected,
       },{
         id: 'service', label: gettext('Service'), type: 'text',
         mode: ['properties', 'edit', 'create'], readonly: obj.isConnectedOrShared,
-        group: gettext('Connection'),
-      }, {
+        group: gettext('Connection'), deps: ['kubernetes_conn'],
+        /* A libpq service file would supply its own host and port, which is
+         * exactly what the port forward is there to decide. */
+        visible: obj.isNotKubernetes,
+      },
+      {
+        id: 'kubernetes_conn', label: gettext('Connect through Kubernetes?'),
+        type: 'switch', group: KUBERNETES_GROUP,
+        mode: ['properties', 'edit', 'create'],
+        readonly: obj.isConnected,
+        disabled: function() {
+          return !pgAdmin.Browser.utils.support_kubernetes;
+        },
+        helpMessage: gettext('pgAdmin forwards a free local port to the selected service or pod, and reads the username, password and database name from the selected Secret or Config Map keys each time it connects. The forward is opened on connect and closed again when the server is disconnected or removed.'),
+        depChange: (state, source)=>{
+          if(source[0] != 'kubernetes_conn') return;
+
+          if(state.kubernetes_conn) {
+            /* These all describe a different way of reaching the server and
+             * cannot apply at the same time as a port forward. */
+            return {
+              host: HOST_MODE_LOCALHOST,
+              use_ssh_tunnel: false,
+              kerberos_conn: false,
+              shared: false,
+              service: null,
+              password: null,
+              save_password: false,
+              k8s_resource_kind: state.k8s_resource_kind || 'service',
+            };
+          }
+
+          return {
+            host: '',
+            ...clearFields([
+              'k8s_context', 'k8s_namespace', 'k8s_resource_name',
+              'k8s_username_ref', 'k8s_password_ref', 'k8s_database_ref',
+            ]),
+          };
+        },
+      },
+      {
+        id: 'k8s_context', label: gettext('Context'), group: KUBERNETES_GROUP,
+        mode: ['properties', 'edit', 'create'], deps: ['kubernetes_conn'],
+        readonly: obj.kubernetesReadOnly,
+        type: (state)=>({
+          type: 'select',
+          options: obj.kubernetesOptions(state, getKubernetesContexts),
+          optionsReloadBasis: String(obj.isKubernetes(state)),
+        }),
+        depChange: (state, source)=>{
+          if(source[0] == 'k8s_context') {
+            return clearFields(KUBERNETES_DOWNSTREAM_OF.k8s_context);
+          }
+        },
+      },
+      {
+        id: 'k8s_namespace', label: gettext('Namespace'),
+        group: KUBERNETES_GROUP, mode: ['properties', 'edit', 'create'],
+        deps: ['kubernetes_conn', 'k8s_context'],
+        readonly: obj.kubernetesReadOnly,
+        type: (state)=>({
+          type: 'select',
+          options: obj.kubernetesOptions(
+            state, ()=>getKubernetesNamespaces(state.k8s_context)),
+          optionsReloadBasis: state.k8s_context,
+        }),
+        depChange: (state, source)=>{
+          if(source[0] == 'k8s_namespace') {
+            return clearFields(KUBERNETES_DOWNSTREAM_OF.k8s_namespace);
+          }
+        },
+      },
+      {
+        id: 'k8s_resource_kind', label: gettext('Resource type'),
+        type: 'toggle', group: KUBERNETES_GROUP,
+        mode: ['properties', 'edit', 'create'],
+        options: RESOURCE_KIND_OPTIONS,
+        deps: ['kubernetes_conn'],
+        readonly: obj.kubernetesReadOnly,
+        depChange: (state, source)=>{
+          if(source[0] == 'k8s_resource_kind') {
+            return clearFields(KUBERNETES_DOWNSTREAM_OF.k8s_resource_kind);
+          }
+        },
+      },
+      {
+        id: 'k8s_resource_name', label: gettext('Service or pod'),
+        group: KUBERNETES_GROUP, mode: ['properties', 'edit', 'create'],
+        deps: [
+          'kubernetes_conn', 'k8s_context', 'k8s_namespace',
+          'k8s_resource_kind',
+        ],
+        readonly: obj.kubernetesReadOnly,
+        type: (state)=>({
+          type: 'select',
+          options: obj.kubernetesOptions(state, ()=>getKubernetesResources(
+            state.k8s_context, state.k8s_namespace, state.k8s_resource_kind
+          )),
+          optionsReloadBasis: [
+            state.k8s_context, state.k8s_namespace, state.k8s_resource_kind,
+          ].join('/'),
+        }),
+        depChange: (state, source)=>{
+          if(source[0] != 'k8s_resource_name') return;
+
+          /* Most workloads expose exactly one port; pick it so the common
+           * case needs no extra decision.  The list was already fetched to
+           * populate this dropdown, so this costs no round trip. */
+          const ports = getCachedKubernetesResourcePorts(
+            state.k8s_context, state.k8s_namespace,
+            state.k8s_resource_kind, state.k8s_resource_name
+          );
+          return {port: ports.length ? ports[0].value : null};
+        },
+      },
+      {
+        id: 'k8s_username_ref', label: gettext('Username from'),
+        group: KUBERNETES_GROUP, mode: ['properties', 'edit', 'create'],
+        deps: ['kubernetes_conn', 'k8s_context', 'k8s_namespace'],
+        readonly: obj.kubernetesReadOnly,
+        type: (state)=>obj.kubernetesSourceField(state),
+        helpMessage: gettext('The Secret or Config Map key holding the user name to connect as.'),
+      },
+      {
+        id: 'k8s_password_ref', label: gettext('Password from'),
+        group: KUBERNETES_GROUP, mode: ['properties', 'edit', 'create'],
+        deps: ['kubernetes_conn', 'k8s_context', 'k8s_namespace'],
+        readonly: obj.kubernetesReadOnly,
+        type: (state)=>obj.kubernetesSourceField(state),
+        helpMessage: gettext('The Secret or Config Map key holding the password. Leave empty if the server does not need one.'),
+      },
+      {
+        id: 'k8s_database_ref', label: gettext('Database from'),
+        group: KUBERNETES_GROUP, mode: ['properties', 'edit', 'create'],
+        deps: ['kubernetes_conn', 'k8s_context', 'k8s_namespace'],
+        readonly: obj.kubernetesReadOnly,
+        type: (state)=>obj.kubernetesSourceField(state),
+        helpMessage: gettext('The Secret or Config Map key holding the maintenance database name.'),
+      },
+      {
         id: 'connection_params', label: gettext('Connection Parameters'),
         type: 'collection', group: gettext('Parameters'),
         schema: this.paramSchema, mode: ['edit', 'create'], uniqueCol: ['name'],
@@ -423,8 +702,12 @@ export default class ServerSchema extends BaseUISchema {
       }, {
         id: 'use_ssh_tunnel', label: gettext('Use SSH tunneling'), type: 'switch',
         mode: ['properties', 'edit', 'create'], group: gettext('SSH Tunnel'),
-        disabled: function() {
-          return !pgAdmin.Browser.utils.support_ssh_tunnel;
+        deps: ['kubernetes_conn'],
+        disabled: function(state) {
+          /* A Kubernetes connection already tunnels through the API
+           * server, so an SSH tunnel has nothing left to reach. */
+          return !pgAdmin.Browser.utils.support_ssh_tunnel
+            || obj.isKubernetes(state);
         },
         readonly: obj.isConnected,
       },{
@@ -564,17 +847,20 @@ export default class ServerSchema extends BaseUISchema {
       {
         id: 'passexec_cmd', label: gettext('Password exec command'), type: 'text',
         group: gettext('Advanced'), controlProps: {maxLength: null},
-        mode: ['properties', 'edit', 'create'],
+        mode: ['properties', 'edit', 'create'], deps: ['kubernetes_conn'],
         disabled: pgAdmin.server_mode == 'True' && pgAdmin.enable_server_passexec_cmd == 'False',
+        /* The cluster is already the source of the password. */
+        visible: obj.isNotKubernetes,
         helpMessage: gettext('The server hostname, port, and username can be passed as variables by using the placeholders %HOSTNAME%, %PORT%, and %USERNAME%, which will be replaced with the corresponding server connection information.')
       },
       {
         id: 'passexec_expiration', label: gettext('Password exec expiration (seconds)'), type: 'int',
         group: gettext('Advanced'),
-        mode: ['properties', 'edit', 'create'],
+        mode: ['properties', 'edit', 'create'], deps: ['kubernetes_conn'],
         disabled: function(state) {
           return isEmptyString(state.passexec_cmd);
         },
+        visible: obj.isNotKubernetes,
       },
       {
         id: 'prepare_threshold', label: gettext('Prepare threshold'), type: 'int',
@@ -600,6 +886,36 @@ export default class ServerSchema extends BaseUISchema {
     ];
   }
 
+  /* A Kubernetes connection is described entirely by its contract, so none
+   * of the host/username/password checks below apply to it. */
+  validateKubernetes(state, setError) {
+    _.each(['host', 'db', 'username', 'port', 'service', 'tunnel_host',
+      'tunnel_port', 'tunnel_username', 'tunnel_identity_file',
+      'tunnel_keep_alive'], (item) => {
+      setError(item, null);
+    });
+
+    const required = [
+      ['k8s_context', gettext('Kubernetes context must be selected.')],
+      ['k8s_namespace', gettext('Namespace must be selected.')],
+      ['k8s_resource_name', gettext('A service or pod must be selected.')],
+      ['port', gettext('The port to forward must be selected.')],
+      ['k8s_username_ref', gettext('A username source must be selected.')],
+      ['k8s_database_ref', gettext('A database source must be selected.')],
+    ];
+
+    for(const [field, message] of required) {
+      if(isEmptyString(state[field])) {
+        setError(field, message);
+        return true;
+      }
+      setError(field, null);
+    }
+
+    setError('k8s_password_ref', null);
+    return false;
+  }
+
   validate(state, setError) {
     let errmsg = null;
 
@@ -609,6 +925,25 @@ export default class ServerSchema extends BaseUISchema {
       return true;
     } else {
       setError('gid', null);
+    }
+
+    if (this.isKubernetes(state)) {
+      return this.validateKubernetes(state, setError);
+    }
+
+    _.each(['k8s_context', 'k8s_namespace', 'k8s_resource_name',
+      'k8s_username_ref', 'k8s_database_ref'], (item) => {
+      setError(item, null);
+    });
+
+    /* Moved off the `db` field's noEmpty so a Kubernetes connection, whose
+     * database name is only known once the cluster has been read, can leave
+     * it blank at registration time. */
+    if(isEmptyString(state.db)) {
+      setError('db', gettext('Maintenance database must be specified.'));
+      return true;
+    } else {
+      setError('db', null);
     }
 
     if (isEmptyString(state.service)) {

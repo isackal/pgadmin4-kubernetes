@@ -9,6 +9,10 @@
 
 module.exports = {
   'static': '/base/pgadmin/static/<path:filename>',
+  'NODE-server.kubernetes_contexts': '/browser/server/kubernetes_contexts',
+  'NODE-server.kubernetes_namespaces': '/browser/server/kubernetes_namespaces',
+  'NODE-server.kubernetes_resources': '/browser/server/kubernetes_resources',
+  'NODE-server.kubernetes_sources': '/browser/server/kubernetes_sources',
   'sqleditor.poll': '/sqleditor/query_tool/poll/<path:trans_id>',
   'sqleditor.query_tool_start': '/sqleditor/query_tool/start/<path:trans_id>',
   'backup.create_server_job':  '/backup/job/<int:sid>',

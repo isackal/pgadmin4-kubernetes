@@ -2357,10 +2357,10 @@ class MViewNode(ViewNode, VacuumSettings):
 
             args = [
                 '--host',
-                manager.local_bind_host if manager.use_ssh_tunnel
+                manager.local_bind_host if manager.is_tunnelled
                 else server.host,
                 '--port',
-                str(manager.local_bind_port) if manager.use_ssh_tunnel
+                str(manager.local_bind_port) if manager.is_tunnelled
                 else str(server.port),
                 '--username', server.username, '--dbname',
                 data['database'],

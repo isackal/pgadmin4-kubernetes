@@ -145,6 +145,63 @@ icon that is located to the right of each of the following fields.
     means that administrators of the server may be able to access those files;
     appropriate caution should be taken before choosing to use this feature.
 
+Click the *Kubernetes* tab to continue.
+
+Use the fields in the *Kubernetes* tab to reach a database running inside a
+Kubernetes cluster without exposing it or copying its credentials.
+
+Rather than a host, port and password, a Kubernetes connection stores which
+workload to reach and where its credentials live. Everything else is worked
+out each time the server is connected: pgAdmin forwards a free local port to
+the selected service or pod through the Kubernetes API server, and reads the
+username, password and database name straight out of the Secret or ConfigMap
+keys you picked. Nothing is prompted for and no password is stored. The
+forward is opened when the server connects and closed again when it is
+disconnected or removed.
+
+pgAdmin uses whichever kubeconfig its own process can see - ``KUBECONFIG``,
+``~/.kube/config``, or the mounted service account when pgAdmin itself runs
+inside a cluster.
+
+* Set "Connect through Kubernetes?" to *Yes* to reach this server through a
+  port forward. The *Host name/address*, *Username*, *Maintenance database*
+  and password fields are then supplied by the cluster and disappear from the
+  dialog.
+* Select the kubeconfig context to use in the *Context* field.
+* Select the namespace holding the database in the *Namespace* field.
+* Use the *Resource type* field to choose between forwarding to a *Service*
+  or directly to a *Pod*. Select a *Service* unless the database has no
+  service in front of it.
+* Select the service or pod to forward to in the *Service or pod* field. A
+  pod that is not ready is marked as such, and cannot be forwarded to.
+* The *Port* field on the *Connection* tab then lists the ports that service
+  or pod exposes. The single port of a workload that only exposes one is
+  selected for you. This is the port on the cluster side; the local port the
+  forward listens on is chosen from whatever is free and is not configurable.
+* Use the *Username from*, *Password from* and *Database from* fields to pick
+  the Secret or ConfigMap key holding each value, shown as
+  ``<secret|configmap>/<name>/<key>``. Secrets and ConfigMaps are offered
+  together because they are read the same way. Only entries that hold usable
+  key/value pairs are listed, so TLS secrets, service account tokens,
+  certificate bundles and seeded SQL files are filtered out. Leave *Password
+  from* empty if the server needs no password.
+* Use the *Host name/address* field on the *Connection* tab to choose which
+  local name the forward is reached by. *localhost* is the default and keeps
+  the forward private to the machine pgAdmin runs on. Choose
+  *host.docker.internal* if something inside a Docker container also has to
+  reach the forwarded port; the listener is then bound on all interfaces
+  rather than on loopback alone.
+
+Because the credentials are read afresh on every connection, rotating the
+Secret is picked up by the next connect without editing the server.
+
+.. note:: A Kubernetes connection cannot be shared with other pgAdmin users,
+    since doing so would lend them the cluster credentials it was registered
+    with. In Server mode, Kubernetes connections are disabled altogether
+    unless ``ALLOW_KUBERNETES_IN_SERVER_MODE`` is enabled, because every
+    logged in user would share the pgAdmin process's kubeconfig. See
+    :ref:`config_py` for both settings.
+
 Click the *SSH Tunnel* tab to continue.
 
 .. image:: images/server_ssh_tunnel.png

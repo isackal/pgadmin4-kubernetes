@@ -628,6 +628,23 @@ SUPPORT_SSH_TUNNEL = True
 ALLOW_SAVE_TUNNEL_PASSWORD = False
 
 ##########################################################################
+# Kubernetes connections reach a database through a port forward that
+# pgAdmin opens on an ephemeral local port, and read the username, password
+# and database name straight out of a Secret or ConfigMap.
+#
+# They use whichever kubeconfig the pgAdmin process itself can see
+# (KUBECONFIG, ~/.kube/config, or the mounted service account when pgAdmin
+# runs inside a cluster).  In SERVER_MODE that identity is shared by every
+# logged in user, so Kubernetes connections are refused there unless this is
+# explicitly turned on for a deployment where that is acceptable.
+##########################################################################
+SUPPORT_KUBERNETES = True
+# Set to True to allow Kubernetes connections when SERVER_MODE is enabled.
+# Every pgAdmin user then gets to read any Secret the server's kubeconfig
+# can reach, so leave this off unless all users are equally trusted.
+ALLOW_KUBERNETES_IN_SERVER_MODE = False
+
+##########################################################################
 # Master password is used to encrypt/decrypt saved server passwords
 # Applicable for desktop mode only
 ##########################################################################

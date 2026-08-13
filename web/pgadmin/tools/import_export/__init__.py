@@ -542,9 +542,9 @@ def create_import_export_job(sid):
 
         env = dict()
         env['PGHOST'] = \
-            manager.local_bind_host if manager.use_ssh_tunnel else server.host
+            manager.local_bind_host if manager.is_tunnelled else server.host
         env['PGPORT'] = \
-            str(manager.local_bind_port) if manager.use_ssh_tunnel else str(
+            str(manager.local_bind_port) if manager.is_tunnelled else str(
                 server.port)
         env['PGUSER'] = server.username
         env['PGDATABASE'] = data['database']

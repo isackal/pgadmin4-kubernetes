@@ -48,6 +48,10 @@ describe('ServerSchema', ()=>{
 
     state.gid = 1;
     schemaObj.validate(state, setError);
+    expect(setError).toHaveBeenCalledWith('db', 'Maintenance database must be specified.');
+
+    state.db = 'postgres';
+    schemaObj.validate(state, setError);
     expect(setError).toHaveBeenCalledWith('host', 'Either Host name or Service must be specified.');
 
     state.host = '127.0.0.1';

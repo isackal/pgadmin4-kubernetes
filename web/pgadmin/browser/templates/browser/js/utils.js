@@ -92,6 +92,7 @@ define('pgadmin.browser.utils',
     app_version_int: '{{ app_version_int}}',
     pg_libpq_version: {{pg_libpq_version|e}},
     support_ssh_tunnel: '{{ support_ssh_tunnel }}' == 'True',
+    support_kubernetes: '{{ support_kubernetes }}' == 'True',
     logout_url: '{{logout_url}}',
     max_server_tags_allowed: {{max_server_tags_allowed}},
 

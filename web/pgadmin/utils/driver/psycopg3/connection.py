@@ -294,6 +294,14 @@ class Connection(BaseConnection):
         if manager.use_ssh_tunnel == 1:
             manager.check_ssh_tunnel_alive()
 
+        # A Kubernetes connection needs its port forward open before libpq
+        # has anywhere to connect to.  Re-opening a dead one here is what
+        # makes the connection survive a session being restored.
+        if manager.kubernetes_conn and not manager.kubernetes_tunnel_alive():
+            status, error = manager.create_kubernetes_tunnel()
+            if not status:
+                return False, error
+
         if is_update_password:
             if encpass is None:
                 encpass = self.password or getattr(manager, 'password', None)
@@ -324,6 +332,12 @@ class Connection(BaseConnection):
                     'Ignoring passexec in favor of the specified passfile '
                     f'({passfile!r}).'
                 )
+
+        # A Kubernetes connection's password lives in the cluster, so it is
+        # read fresh by create_kubernetes_tunnel() above and never saved,
+        # prompted for, or encrypted into the config database.
+        if manager.kubernetes_conn:
+            password = manager.k8s_password
 
         # create_connection_string() automatically picks up the passfile from
         # connection parameters. Warn if that differs from the passfile kwarg.
@@ -384,6 +398,7 @@ class Connection(BaseConnection):
 
         except psycopg.Error as e:
             manager.stop_ssh_tunnel()
+            manager.stop_kubernetes_tunnel_if_idle()
             if hasattr(e, 'pgerror'):
                 msg = e.pgerror
             elif e.diag.message_detail:
@@ -413,6 +428,7 @@ class Connection(BaseConnection):
             status, msg = self._initialize(conn_id, **kwargs)
         except Exception as e:
             manager.stop_ssh_tunnel()
+            manager.stop_kubernetes_tunnel_if_idle()
             current_app.logger.exception(e)
             self.conn = None
             if not self.reconnecting:

@@ -42,6 +42,9 @@ google-auth-oauthlib==1.4.0; python_version > '3.9'
 gssapi==1.11.*
 jsonformatter~=0.3.4
 keyring==25.*
+# 35.0.0 is the first release that stopped pinning urllib3<2.4, which would
+# otherwise conflict with the urllib3 pin below.
+kubernetes==36.*
 ldap3==2.*
 libgravatar==1.0.*
 paramiko==3.5.1

@@ -48,6 +48,10 @@ from pgadmin.utils import get_complete_file_path
 from pgadmin.settings.utils import with_object_filters
 from pgadmin.utils.server_access import get_server, \
     get_user_server_query, get_server_group
+from pgadmin.utils.kubernetes import HOST_MODES, KubernetesError, \
+    RESOURCE_KINDS, is_kubernetes_supported, list_contexts, \
+    list_data_sources, list_namespaces, list_resources, parse_reference, \
+    resolve_reference
 
 
 # File-path keys in connection_params that are per-user and must
@@ -57,6 +61,114 @@ SENSITIVE_CONN_KEYS = frozenset({
     'passfile', 'sslcert', 'sslkey',
     'sslrootcert', 'sslcrl', 'sslcrldir',
 })
+
+# Columns that make up a Kubernetes connection contract.
+KUBERNETES_FIELDS = (
+    'k8s_context', 'k8s_namespace', 'k8s_resource_kind', 'k8s_resource_name',
+    'k8s_username_ref', 'k8s_password_ref', 'k8s_database_ref',
+)
+
+
+def is_kubernetes_server(server):
+    return bool(getattr(server, 'kubernetes_conn', 0))
+
+
+def validate_kubernetes_data(data):
+    """Check a Kubernetes contract before it reaches the database.
+
+    Returns an error message, or None when the contract is complete.
+    """
+    if not is_kubernetes_supported():
+        return gettext(
+            'Kubernetes connections are not available on this installation.')
+
+    if data.get('shared'):
+        # A shared server would hand every other user the cluster identity
+        # of whoever registered it, which is not theirs to lend.
+        return gettext('A Kubernetes connection cannot be shared.')
+
+    required = {
+        'k8s_context': gettext('Kubernetes context'),
+        'k8s_namespace': gettext('Namespace'),
+        'k8s_resource_kind': gettext('Resource type'),
+        'k8s_resource_name': gettext('Service or pod'),
+        'k8s_username_ref': gettext('Username reference'),
+        'k8s_database_ref': gettext('Database reference'),
+    }
+    for field, label in required.items():
+        if not data.get(field):
+            return gettext('{0} must be specified for a Kubernetes '
+                           'connection.').format(label)
+
+    if data['k8s_resource_kind'] not in RESOURCE_KINDS:
+        return gettext('Unknown Kubernetes resource type "{0}".').format(
+            data['k8s_resource_kind'])
+
+    if data.get('host') not in HOST_MODES:
+        return gettext('The host of a Kubernetes connection must be one '
+                       'of: {0}.').format(', '.join(HOST_MODES))
+
+    if not data.get('port'):
+        return gettext('The port exposed by the service or pod must be '
+                       'specified.')
+
+    for field in ('k8s_username_ref', 'k8s_password_ref', 'k8s_database_ref'):
+        if data.get(field):
+            try:
+                parse_reference(data[field])
+            except KubernetesError as e:
+                return str(e)
+
+    return None
+
+
+def resolve_kubernetes_identity(data):
+    """Read the username and database name a contract points at.
+
+    They are stored on the server row as well as being re-read at connect
+    time: the columns are NOT NULL, and pgAdmin shows them all over the
+    tree and dialogs long before anything is connected.
+
+    The password is resolved too but deliberately thrown away.  Reading it
+    here is what turns a reference pointing at a key that does not exist
+    into an error on the dialog rather than a failed connection later.
+    """
+    context = data.get('k8s_context')
+    namespace = data.get('k8s_namespace')
+
+    username = resolve_reference(context, namespace, data['k8s_username_ref'])
+    database = resolve_reference(context, namespace, data['k8s_database_ref'])
+
+    if data.get('k8s_password_ref'):
+        resolve_reference(context, namespace, data['k8s_password_ref'])
+
+    return username, database
+
+
+def refresh_kubernetes_identity(server):
+    """Re-read the username and database name before connecting.
+
+    Rotating a Secret changes what the contract resolves to, so the stored
+    snapshot is refreshed rather than trusted.
+    """
+    if not is_kubernetes_server(server):
+        return
+
+    username = resolve_reference(
+        server.k8s_context, server.k8s_namespace, server.k8s_username_ref)
+    database = resolve_reference(
+        server.k8s_context, server.k8s_namespace, server.k8s_database_ref)
+
+    changed = False
+    if username and username != server.username:
+        server.username = username
+        changed = True
+    if database and database != server.maintenance_db:
+        server.maintenance_db = database
+        changed = True
+
+    if changed and object_session(server) is not None:
+        db.session.commit()
 
 
 def _is_non_owner(server):
@@ -347,6 +459,7 @@ class ServerModule(sg.ServerGroupPluginModule):
                 username=server.username,
                 shared=server.shared,
                 is_kerberos_conn=bool(server.kerberos_conn),
+                kubernetes_conn=is_kubernetes_server(server),
                 gss_authenticated=manager.gss_authenticated,
                 cloud_status=server.cloud_status,
                 description=server.comment,
@@ -421,7 +534,11 @@ class ServerModule(sg.ServerGroupPluginModule):
         ServerType.register_preferences()
 
     def get_exposed_url_endpoints(self):
-        return ['NODE-server.connect_id']
+        return ['NODE-server.connect_id',
+                'NODE-server.kubernetes_contexts',
+                'NODE-server.kubernetes_namespaces',
+                'NODE-server.kubernetes_resources',
+                'NODE-server.kubernetes_sources']
 
     @staticmethod
     def create_shared_server(data, gid):
@@ -568,6 +685,12 @@ class ServerNode(PGChildNodeView):
         'check_pgpass': [{'get': 'check_pgpass'}],
         'clear_saved_password': [{'put': 'clear_saved_password'}],
         'clear_sshtunnel_password': [{'put': 'clear_sshtunnel_password'}],
+        # Discovery for the Kubernetes tab of the server dialog.  These run
+        # while the server is still being registered, so they carry no ids.
+        'kubernetes_contexts': [{}, {}, {'get': 'kubernetes_contexts'}],
+        'kubernetes_namespaces': [{}, {}, {'get': 'kubernetes_namespaces'}],
+        'kubernetes_resources': [{}, {}, {'get': 'kubernetes_resources'}],
+        'kubernetes_sources': [{}, {}, {'get': 'kubernetes_sources'}],
     })
 
     def update_connection_parameter(self, data, server, sharedserver=None):
@@ -695,6 +818,7 @@ class ServerNode(PGChildNodeView):
                     username=server.username,
                     shared=server.shared,
                     is_kerberos_conn=bool(server.kerberos_conn),
+                    kubernetes_conn=is_kubernetes_server(server),
                     gss_authenticated=manager.gss_authenticated,
                     description=server.comment,
                     tags=server.tags
@@ -770,6 +894,7 @@ class ServerNode(PGChildNodeView):
                 shared=server.shared,
                 username=server.username,
                 is_kerberos_conn=bool(server.kerberos_conn),
+                kubernetes_conn=is_kubernetes_server(server),
                 gss_authenticated=manager.gss_authenticated,
                 tags=server.tags
             ),
@@ -887,7 +1012,15 @@ class ServerNode(PGChildNodeView):
             'connection_params': 'connection_params',
             'prepare_threshold': 'prepare_threshold',
             'tags': 'tags',
-            'post_connection_sql': 'post_connection_sql'
+            'post_connection_sql': 'post_connection_sql',
+            'kubernetes_conn': 'kubernetes_conn',
+            'k8s_context': 'k8s_context',
+            'k8s_namespace': 'k8s_namespace',
+            'k8s_resource_kind': 'k8s_resource_kind',
+            'k8s_resource_name': 'k8s_resource_name',
+            'k8s_username_ref': 'k8s_username_ref',
+            'k8s_password_ref': 'k8s_password_ref',
+            'k8s_database_ref': 'k8s_database_ref',
         }
 
         disp_lbl = {
@@ -926,6 +1059,11 @@ class ServerNode(PGChildNodeView):
         manager = get_driver(PG_DEFAULT_DRIVER).connection_manager(sid)
         conn = manager.connection()
         connected = conn.connected()
+
+        errmsg = self._prepare_kubernetes_update(data, server, connected)
+        if errmsg is not None:
+            return make_json_response(
+                success=0, status=400, errormsg=errmsg)
 
         self._server_modify_disallowed_when_connected(
             connected, data, disp_lbl)
@@ -986,6 +1124,51 @@ class ServerNode(PGChildNodeView):
             )
         )
 
+    def _prepare_kubernetes_update(self, data, server, connected):
+        """Validate an incoming Kubernetes contract and resolve its identity.
+
+        The request only carries the fields the user touched, so the stored
+        values fill in the rest before anything is checked.
+
+        :return: an error message, or None when the update may proceed.
+        """
+        kubernetes_conn = data.get(
+            'kubernetes_conn', getattr(server, 'kubernetes_conn', 0))
+
+        if not kubernetes_conn:
+            # Turning Kubernetes off leaves a contract behind that no longer
+            # describes anything, so clear it out.
+            if 'kubernetes_conn' in data and is_kubernetes_server(server):
+                for field in KUBERNETES_FIELDS:
+                    data.setdefault(field, None)
+            return None
+
+        effective = {
+            'shared': data.get('shared', server.shared),
+            'host': data.get('host', server.host),
+            'port': data.get('port', server.port),
+        }
+        for field in KUBERNETES_FIELDS:
+            effective[field] = data.get(field, getattr(server, field, None))
+
+        errmsg = validate_kubernetes_data(effective)
+        if errmsg:
+            return errmsg
+
+        # While connected, the username and database are pinned by the live
+        # connection and may not be modified, so leave them alone.
+        if connected:
+            return None
+
+        try:
+            username, database = resolve_kubernetes_identity(effective)
+        except KubernetesError as e:
+            return str(e)
+
+        data['username'] = username
+        data['db'] = database
+        return None
+
     @staticmethod
     def _update_server_details(server, sharedserver,
                                config_param_map, arg, value):
@@ -1032,7 +1215,7 @@ class ServerNode(PGChildNodeView):
                     self.delete_shared_server(gid, server.id)
                 if arg in ('sslcompression', 'use_ssh_tunnel',
                            'tunnel_authentication',
-                           'kerberos_conn', 'shared'):
+                           'kerberos_conn', 'shared', 'kubernetes_conn'):
                     value = 1 if value else 0
                 self._update_server_details(server, sharedserver,
                                             config_param_map, arg,
@@ -1202,6 +1385,14 @@ class ServerNode(PGChildNodeView):
             'prepare_threshold': server.prepare_threshold,
             'tags': tags,
             'post_connection_sql': server.post_connection_sql,
+            'kubernetes_conn': is_kubernetes_server(server),
+            'k8s_context': server.k8s_context,
+            'k8s_namespace': server.k8s_namespace,
+            'k8s_resource_kind': server.k8s_resource_kind,
+            'k8s_resource_name': server.k8s_resource_name,
+            'k8s_username_ref': server.k8s_username_ref,
+            'k8s_password_ref': server.k8s_password_ref,
+            'k8s_database_ref': server.k8s_database_ref,
         }
 
         return ajax_response(response)
@@ -1243,6 +1434,27 @@ class ServerNode(PGChildNodeView):
         for item in data:
             if data[item] == '':
                 data[item] = None
+
+        kubernetes_conn = bool(data.get('kubernetes_conn', False))
+        if kubernetes_conn:
+            errmsg = validate_kubernetes_data(data)
+            if errmsg:
+                return make_json_response(
+                    status=400, success=0, errormsg=errmsg)
+
+            # The dialog never asks for a username, database or password:
+            # they are read out of the cluster, both now (the columns are
+            # NOT NULL and the tree shows them) and at every connect.
+            try:
+                data['username'], data['db'] = \
+                    resolve_kubernetes_identity(data)
+            except KubernetesError as e:
+                return make_json_response(
+                    status=400, success=0, errormsg=str(e))
+
+            data['role'] = data.get('role', None)
+            data['password'] = None
+            data['save_password'] = False
 
         # Get enc key
         crypt_key_present, crypt_key = get_crypt_key()
@@ -1337,7 +1549,15 @@ class ServerNode(PGChildNodeView):
                 connection_params=connection_params,
                 prepare_threshold=data.get('prepare_threshold', None),
                 tags=data.get('tags', None),
-                post_connection_sql=data.get('post_connection_sql', None)
+                post_connection_sql=data.get('post_connection_sql', None),
+                kubernetes_conn=1 if kubernetes_conn else 0,
+                k8s_context=data.get('k8s_context', None),
+                k8s_namespace=data.get('k8s_namespace', None),
+                k8s_resource_kind=data.get('k8s_resource_kind', None),
+                k8s_resource_name=data.get('k8s_resource_name', None),
+                k8s_username_ref=data.get('k8s_username_ref', None),
+                k8s_password_ref=data.get('k8s_password_ref', None),
+                k8s_database_ref=data.get('k8s_database_ref', None)
             )
             db.session.add(server)
             db.session.commit()
@@ -1426,6 +1646,7 @@ class ServerNode(PGChildNodeView):
                     if manager and manager.version
                     else None,
                     is_kerberos_conn=bool(server.kerberos_conn),
+                    kubernetes_conn=is_kubernetes_server(server),
                     gss_authenticated=manager.gss_authenticated if
                     manager and manager.gss_authenticated else False,
                     is_password_saved=bool(server.save_password),
@@ -1500,6 +1721,66 @@ class ServerNode(PGChildNodeView):
             ),
             200, {'Content-Type': MIMETYPE_APP_JS}
         )
+
+    @pga_login_required
+    def kubernetes_contexts(self):
+        """Contexts available in the kubeconfig pgAdmin can see."""
+        return self._kubernetes_response(list_contexts)
+
+    @pga_login_required
+    def kubernetes_namespaces(self):
+        """Namespaces visible in the selected context."""
+        context = request.args.get('context')
+        return self._kubernetes_response(list_namespaces, context)
+
+    @pga_login_required
+    def kubernetes_resources(self):
+        """Services or pods, with the TCP ports each one exposes."""
+        context = request.args.get('context')
+        namespace = request.args.get('namespace')
+        kind = request.args.get('kind')
+
+        if not namespace or not kind:
+            return make_json_response(
+                status=400, success=0,
+                errormsg=gettext(
+                    'A namespace and a resource type are required.'))
+
+        return self._kubernetes_response(
+            list_resources, context, namespace, kind)
+
+    @pga_login_required
+    def kubernetes_sources(self):
+        """Secrets and config maps holding usable key/value pairs."""
+        context = request.args.get('context')
+        namespace = request.args.get('namespace')
+
+        if not namespace:
+            return make_json_response(
+                status=400, success=0,
+                errormsg=gettext('A namespace is required.'))
+
+        return self._kubernetes_response(list_data_sources, context, namespace)
+
+    @staticmethod
+    def _kubernetes_response(func, *args):
+        """Run a discovery call, turning cluster problems into a message the
+        dialog can show next to the dropdown that failed."""
+        if not is_kubernetes_supported():
+            return make_json_response(
+                status=501, success=0,
+                errormsg=gettext(
+                    'Kubernetes connections are not available on this '
+                    'installation.'))
+
+        try:
+            return ajax_response(response=func(*args))
+        except KubernetesError as e:
+            return make_json_response(
+                status=400, success=0, errormsg=str(e))
+        except Exception as e:
+            current_app.logger.exception(e)
+            return internal_server_error(errormsg=str(e))
 
     def connect_status(self, gid, sid):
         """Check and return the connection status."""
@@ -1622,6 +1903,17 @@ class ServerNode(PGChildNodeView):
         prompt_password = False
         prompt_tunnel_password = False
 
+        # A Kubernetes contract points at Secret keys, not at values, so the
+        # username and database are re-read here.  Doing it before the
+        # manager is updated means a rotated Secret is picked up by the
+        # connection that is about to be made, not the one after it.
+        if is_kubernetes_server(server):
+            try:
+                refresh_kubernetes_identity(server)
+            except KubernetesError as e:
+                return self.get_response_for_password(
+                    server, 401, False, False, str(e))
+
         # Connect the Server
         manager = get_driver(PG_DEFAULT_DRIVER).connection_manager(sid)
         # Update the manager with the server details if not connected and
@@ -1676,7 +1968,10 @@ class ServerNode(PGChildNodeView):
             if conn_passwd is None and not server.save_password and \
                     passfile_param is None and \
                     server.passexec_cmd is None and \
-                    server.service is None:
+                    server.service is None and \
+                    not is_kubernetes_server(server):
+                # A Kubernetes connection reads its password from the
+                # cluster at connect time, so there is nothing to prompt for.
                 prompt_password = True
             elif passfile_param and passfile_param != '' and \
                     get_complete_file_path(passfile_param):
@@ -1803,6 +2098,7 @@ class ServerNode(PGChildNodeView):
                     'is_tunnel_password_saved': True
                     if server.tunnel_password is not None else False,
                     'is_kerberos_conn': bool(server.kerberos_conn),
+                    'kubernetes_conn': is_kubernetes_server(server),
                     'gss_authenticated': manager.gss_authenticated
                 }
             )
@@ -2182,6 +2478,17 @@ class ServerNode(PGChildNodeView):
 
     def get_response_for_password(self, server, status, prompt_password=False,
                                   prompt_tunnel_password=False, errmsg=None):
+
+        if is_kubernetes_server(server):
+            # There is no password to ask for - it lives in the cluster - so
+            # report what actually went wrong instead of opening a prompt
+            # the user cannot answer.
+            return make_json_response(
+                success=0,
+                status=status,
+                errormsg=errmsg or gettext(
+                    'Could not connect to the Kubernetes server.')
+            )
 
         if server.use_ssh_tunnel:
             data = {

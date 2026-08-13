@@ -654,7 +654,9 @@ define('pgadmin.node.server', [
               setTimeout(function() {
                 if (msg == 'CRYPTKEY_SET') {
                   connect_to_server(_node, _data, _tree, _item, _wasConnected);
-                } else if (msg != 'CRYPTKEY_NOT_SET') {
+                } else if (msg != 'CRYPTKEY_NOT_SET' && !_data.kubernetes_conn) {
+                  // A Kubernetes connection reads its password out of the
+                  // cluster, so there is nothing to prompt for.
                   showServerPassword(
                     gettext('Connect to Server'),
                     msg, _node, _data, _tree, _item, _wasConnected, onSuccess,
