@@ -22,12 +22,19 @@ APP_REVISION = 17
 
 # Application version suffix, e.g. 'beta1', 'dev'. Usually an empty string
 # for GA releases.
-APP_SUFFIX = ''
+#
+# pgAdminK keeps the upstream release and revision it is based on, and carries
+# its own fork revision here. Upstream GA releases always ship an empty suffix,
+# so a suffixed version can never collide with one of theirs, and the base
+# number still records which pgAdmin this was forked from. Bump the number
+# here for a new fork release on the same base; when rebasing onto a newer
+# pgAdmin, take their APP_RELEASE/APP_REVISION and reset this to 'k8s1'.
+APP_SUFFIX = 'k8s1'
 
 # Numeric application version for upgrade checks. Should be in the format:
 # [X]XYYZZ, where X is the release version, Y is the revision, with a leading
 # zero if needed, and Z represents the suffix, with a leading zero if needed
-APP_VERSION_INT = 91700
+APP_VERSION_INT = 91701
 
 # DO NOT CHANGE!
 # The application version string, constructed from the components
