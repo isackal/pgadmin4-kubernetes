@@ -1,9 +1,15 @@
-#define MyAppName "pgAdmin 4"
+; MyAppName is what separates this installer from upstream pgAdmin's. It feeds
+; AppId, the install directory, the Start Menu group and the HKA\Software key,
+; and CheckPgAdminAlreadyInstalled below silently uninstalls whatever it finds
+; under Software\{#MyAppName}\{#CheckOldInstallerVersion} - so leaving this as
+; "pgAdmin 4" would make this installer remove a user's real pgAdmin.
+#define MyAppName "pgAdminK"
 #define MyAppVersion MYAPP_VERSION
-#define MyAppPublisher "The pgAdmin Development Team"
-#define MyAppURL "www.pgadmin.org"
+#define MyAppPublisher "pgAdminK Contributors"
+#define MyAppURL "github.com/isackal/pgadmin4-kubernetes"
 #define MyAppExeName "pgAdmin4.exe"
-#define MyAppID "C14F64E7-DCB9-4DE1-8560-16F08FCFF64E"
+; Regenerated for the fork; must not be upstream's C14F64E7-DCB9-4DE1-8560-16F08FCFF64E.
+#define MyAppID "9081EA95-6CE2-4897-A364-2CB56C9C4617"
 #define MyAppFullVersion MYAPP_FULLVERSION
 #define MyAppArchitecturesMode "x64"
 #define MyAppVCDist MYAPP_VCDIST
@@ -24,7 +30,7 @@ DefaultGroupName={#MyAppName}
 DisableWelcomePage=no
 DisableProgramGroupPage=auto
 LicenseFile=Resources\license.rtf
-OutputBaseFilename=pgadmin4-setup
+OutputBaseFilename=pgadmink-setup
 SetupIconFile=Resources\pgAdmin4.ico
 Compression=lzma
 SolidCompression=yes

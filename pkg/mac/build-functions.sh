@@ -270,12 +270,15 @@ _complete_bundle() {
     cp Info.plist.in "${BUNDLE_DIR}/Contents/Info.plist"
     sed -i '' "s/%APPNAME%/${APP_NAME}/g" "${BUNDLE_DIR}/Contents/Info.plist"
     sed -i '' "s/%APPVER%/${APP_LONG_VERSION}/g" "${BUNDLE_DIR}/Contents/Info.plist"
-    sed -i '' "s/%APPID%/org.pgadmin.pgadmin4/g" "${BUNDLE_DIR}/Contents/Info.plist"
+    # Must not be org.pgadmin.pgadmin4: macOS keys Launch Services, TCC
+    # privacy grants and keychain ACLs off the bundle identifier, so reusing
+    # upstream's would make the two apps indistinguishable to the OS.
+    sed -i '' "s/%APPID%/io.github.isackal.pgadmink/g" "${BUNDLE_DIR}/Contents/Info.plist"
 
     # Rename helper execs and Update the plist
     for helper_exec in "Electron Helper" "Electron Helper (Renderer)" "Electron Helper (Plugin)" "Electron Helper (GPU)"
     do
-        pgadmin_exec=${helper_exec//Electron/pgAdmin 4}
+        pgadmin_exec=${helper_exec//Electron/${APP_NAME}}
         mv "${BUNDLE_DIR}/Contents/Frameworks/${helper_exec}.app/Contents/MacOS/${helper_exec}" "${BUNDLE_DIR}/Contents/Frameworks/${helper_exec}.app/Contents/MacOS/${pgadmin_exec}"
         mv "${BUNDLE_DIR}/Contents/Frameworks/${helper_exec}.app" "${BUNDLE_DIR}/Contents/Frameworks/${pgadmin_exec}.app"
 
@@ -283,11 +286,11 @@ _complete_bundle() {
         cp Info.plist-helper.in "${info_plist}"
         sed -i '' "s/%APPNAME%/${pgadmin_exec}/g" "${info_plist}"
         sed -i '' "s/%APPVER%/${APP_LONG_VERSION}/g" "${info_plist}"
-        sed -i '' "s/%APPID%/org.pgadmin.pgadmin4.helper/g" "${info_plist}"
+        sed -i '' "s/%APPID%/io.github.isackal.pgadmink.helper/g" "${info_plist}"
     done
 
     # PkgInfo
-    echo APPLPGA4 > "${BUNDLE_DIR}/Contents/PkgInfo"
+    echo APPLPGAK > "${BUNDLE_DIR}/Contents/PkgInfo"
 
     # Icon
     cp pgAdmin4.icns "${BUNDLE_DIR}/Contents/Resources/app.icns"
@@ -295,8 +298,11 @@ _complete_bundle() {
     # Rename the executable
     mv "${BUNDLE_DIR}/Contents/MacOS/Electron" "${BUNDLE_DIR}/Contents/MacOS/${APP_NAME}"
 
-    # Rename the app in package.json so the menu looks as it should
-    sed -i '' "s/\"name\": \"pgadmin4\"/\"name\": \"${APP_NAME}\"/g" "${BUNDLE_DIR}/Contents/Resources/app/package.json"
+    # Rename the app in package.json so the menu looks as it should.
+    # Electron also derives app.getPath('userData') from this name, so it must
+    # never be left as upstream's - the Windows build ships runtime/package.json
+    # verbatim and relies on the name set there being distinct.
+    sed -i '' "s/\"name\": \"pgadmink\"/\"name\": \"${APP_NAME}\"/g" "${BUNDLE_DIR}/Contents/Resources/app/package.json"
 
     # Import the dependencies, and rewrite any library references
         _fixup_imports "${BUNDLE_DIR}"
@@ -568,7 +574,7 @@ _codesign_binaries() {
         codesign --deep --force --verify --verbose --timestamp \
                  --options runtime \
                  --entitlements "${BUILD_ROOT}/entitlements.plist" \
-                 -i org.pgadmin.pgadmin4 \
+                 -i io.github.isackal.pgadmink \
                  --sign "${DEVELOPER_ID}" \
                  "$i"
     done
@@ -578,7 +584,7 @@ _codesign_binaries() {
         codesign --deep --force --verify --verbose --timestamp \
                  --options runtime \
                  --entitlements "${BUILD_ROOT}/entitlements.plist" \
-                 -i org.pgadmin.pgadmin4 \
+                 -i io.github.isackal.pgadmink \
                  --sign "${DEVELOPER_ID}" \
                  {} \;
 }
@@ -593,7 +599,7 @@ _codesign_bundle() {
     codesign --deep --force --verify --verbose --timestamp \
              --options runtime \
              --entitlements "${BUILD_ROOT}/entitlements.plist" \
-             -i org.pgadmin.pgadmin4 \
+             -i io.github.isackal.pgadmink \
              --sign "${DEVELOPER_ID}" \
              "${BUNDLE_DIR}"
 
@@ -605,7 +611,7 @@ _create_zip() {
     ZIP_NAME="${DMG_NAME%.dmg}.zip"
     echo "ZIP_NAME: ${ZIP_NAME}"
 
-    echo "Compressing pgAdmin 4.app in bundle dir into ${ZIP_NAME}..."
+    echo "Compressing ${APP_NAME}.app in bundle dir into ${ZIP_NAME}..."
     ditto -c -k --sequesterRsrc --keepParent "${BUNDLE_DIR}" "${ZIP_NAME}"
 
     if [ $? -ne 0 ]; then
@@ -650,7 +656,7 @@ _codesign_dmg() {
     echo Signing disk image...
     codesign --force --verify --verbose --timestamp \
              --options runtime \
-             -i org.pgadmin.pgadmin4 \
+             -i io.github.isackal.pgadmink \
              --sign "${DEVELOPER_ID}" \
              "${DMG_NAME}"
 }

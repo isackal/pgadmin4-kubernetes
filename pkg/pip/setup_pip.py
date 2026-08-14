@@ -55,12 +55,19 @@ if not os.path.exists(path):
 sys.path.append(path)
 import config
 
+# PEP 440 has no place for pgAdmin's '9.17-k8s1' form and setuptools rejects
+# it outright. A fork revision on top of an upstream release is exactly what a
+# local version identifier is for, so the separator becomes '+':
+# 9.17-k8s1 -> 9.17+k8s1. A GA version with an empty APP_SUFFIX is unchanged.
+PIP_VERSION = config.APP_VERSION.replace('-', '+', 1)
+
 setup(
-    name='pgadmin4',
+    # Not 'pgadmin4': that distribution name belongs to upstream pgAdmin.
+    name='pgadmink',
 
-    version=config.APP_VERSION,
+    version=PIP_VERSION,
 
-    description='PostgreSQL Tools',
+    description='PostgreSQL Tools with Kubernetes connections',
     long_description='pgAdmin is the most popular and feature rich Open '
                      'Source administration and development platform for '
                      'PostgreSQL, the most advanced Open Source database in '
@@ -68,9 +75,9 @@ setup(
                      'macOS and Windows to manage PostgreSQL and EDB '
                      'Advanced Server 10 and above.',
 
-    url='https://www.pgadmin.org/',
+    url='https://github.com/isackal/pgadmin4-kubernetes',
 
-    author='The pgAdmin Development Team',
+    author='pgAdminK Contributors',
     author_email='pgadmin-hackers@postgresql.org',
 
     license='PostgreSQL Licence',
