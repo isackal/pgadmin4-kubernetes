@@ -17,6 +17,12 @@ on:
   push:
     tags:
       - 'v*'
+    # TEMPORARY - drop this before merging. Proves the two desktop builds on
+    # the branch itself, since workflow_dispatch is only offered for workflows
+    # that already exist on the default branch. The publish job is tag-gated,
+    # so these runs upload artifacts and release nothing.
+    branches:
+      - 'release/pgadmink-desktop'
 
   workflow_dispatch:
     inputs:
