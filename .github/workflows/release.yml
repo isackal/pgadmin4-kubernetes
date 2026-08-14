@@ -1,0 +1,178 @@
+name: Release
+
+# Builds the macOS and Windows desktop bundles and publishes them as a
+# GitHub Release.
+#
+# Normal use is to push a signed tag:
+#
+#     git tag -s v1.0.0 -m "v1.0.0"
+#     git push origin v1.0.0
+#
+# workflow_dispatch is kept as an escape hatch: it is the only trigger that
+# works while a fork still has push/pull_request workflows gated, and it lets
+# a failed release be re-run against an existing tag without moving it.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and release (e.g. v1.0.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: 'release @ ${{ inputs.tag || github.ref }}'
+  cancel-in-progress: false
+
+env:
+  # The ref to build. On a tag push this is the tag that triggered the run; on
+  # a manual dispatch it is whatever tag was typed in.
+  RELEASE_REF: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build-macos:
+    name: macOS (arm64)
+    # Only Apple Silicon runners are used. GitHub has retired its Intel macOS
+    # images, so an x86_64 .dmg would need a self-hosted Intel runner; add a
+    # matrix entry pointing at one if Intel builds are needed. pkg/mac builds
+    # for the host architecture only - there is no cross-compile path here.
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+
+      - name: Install build dependencies
+        run: |
+          # wget is used to fetch the pinned Electron build, syft generates the
+          # CycloneDX SBOM, and the PostgreSQL install supplies the client
+          # binaries (pg_dump, psql, ...) that get copied into the bundle.
+          brew install --quiet wget syft postgresql@17
+          echo "PGADMIN_POSTGRES_DIR=$(brew --prefix postgresql@17)" >> "${GITHUB_ENV}"
+
+      - name: Build the app bundle and DMG
+        # codesign.conf and notarization.conf are absent, so build.sh sets
+        # CODESIGN=0 / NOTARIZE=0 and produces an unsigned bundle. To sign,
+        # write those two files from secrets in a step before this one.
+        run: ./pkg/mac/build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  build-windows:
+    name: Windows (x64)
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+
+      - uses: actions/setup-python@v5
+        with:
+          # Make.bat bakes the Python version into the runtime layout, and
+          # pkg/mac defaults to the same 3.13 series - keep them aligned.
+          python-version: '3.13'
+
+      - name: Install build dependencies
+        run: |
+          choco install innosetup --no-progress -y
+          choco install mitkerberos --no-progress -y
+          choco install postgresql17 --no-progress -y --params '/Password:postgres'
+          choco install syft --no-progress -y
+
+      - name: Resolve build paths
+        shell: pwsh
+        run: |
+          # Make.bat wants a directory containing python.exe, not the exe.
+          $python = Split-Path -Parent (Get-Command python).Source
+          "PGADMIN_PYTHON_DIR=$python" >> $env:GITHUB_ENV
+
+          # The runner ships VS 2022 Enterprise, not Community, and the redist
+          # version directory changes with every image update - discover it
+          # rather than hard-coding Make.bat's default path.
+          $redist = Get-ChildItem `
+            -Path "C:\Program Files\Microsoft Visual Studio\2022\*\VC\Redist\MSVC\*" `
+            -Directory -ErrorAction Stop |
+            Where-Object { Test-Path (Join-Path $_.FullName 'vc_redist.x64.exe') } |
+            Sort-Object Name |
+            Select-Object -Last 1
+          if (-not $redist) { throw 'No VC++ redistributable directory found' }
+          "PGADMIN_VCREDIST_DIR=$($redist.FullName)" >> $env:GITHUB_ENV
+
+          # signtool lives under a versioned Windows SDK directory.
+          $signtool = Get-ChildItem `
+            -Path "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" `
+            -ErrorAction SilentlyContinue |
+            Sort-Object FullName |
+            Select-Object -Last 1
+          if ($signtool) {
+            "PGADMIN_SIGNTOOL_DIR=$($signtool.Directory.FullName)" >> $env:GITHUB_ENV
+          }
+
+      - name: Build the installer
+        shell: cmd
+        # PGADMIN_WINDOWS_CSC is deliberately unset, so Make.bat skips signing
+        # and signature verification. Set it from a secret to sign.
+        env:
+          PGADMIN_KRB5_DIR: C:\Program Files\MIT\Kerberos
+          PGADMIN_POSTGRES_DIR: C:\Program Files\PostgreSQL\17
+          PGADMIN_INNOTOOL_DIR: C:\Program Files (x86)\Inno Setup 6
+        run: Make.bat
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/*.exe
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
+          # Full history so the generated notes can diff against the previous tag.
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ls -lh artifacts/
+
+          # --verify-tag keeps a dispatch run from inventing a tag that was
+          # never pushed, so every release stays anchored to a signed tag.
+          gh release create "${RELEASE_REF}" \
+            --title "${RELEASE_REF}" \
+            --generate-notes \
+            --verify-tag \
+            artifacts/*
