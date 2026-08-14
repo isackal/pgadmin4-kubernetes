@@ -132,6 +132,13 @@ jobs:
           choco install postgresql17 --no-progress -y --params '/Password:postgres'
           choco install syft --no-progress -y
 
+          # Make.bat's VALIDATE_ENVIRONMENT looks for virtualenv.exe in the
+          # Scripts directory of PGADMIN_PYTHON_DIR, which is the interpreter
+          # setup-python just installed. It builds the bundled runtime with
+          # virtualenv rather than the stdlib venv module, so this is a hard
+          # requirement, not a convenience.
+          python -m pip install --upgrade pip virtualenv
+
       - name: Resolve build paths
         shell: pwsh
         run: |
