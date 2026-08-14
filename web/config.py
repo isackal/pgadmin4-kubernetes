@@ -435,7 +435,13 @@ GLOBALLY_DELIVERABLE = True
 ##########################################################################
 
 # Check for new versions of the application?
-UPGRADE_CHECK_ENABLED = True
+#
+# Disabled for pgAdminK. The upstream feed below only describes pgAdmin
+# releases, so leaving this on would compare this fork's version against
+# theirs and advertise an "upgrade" that is a different application without
+# Kubernetes support. Point UPGRADE_CHECK_URL at a feed describing pgAdminK
+# releases and set this back to True to re-enable it.
+UPGRADE_CHECK_ENABLED = False
 
 # Where should we get the data from?
 UPGRADE_CHECK_URL = 'https://www.pgadmin.org/versions.json'
