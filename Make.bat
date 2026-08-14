@@ -385,7 +385,8 @@ REM Main build sequence Ends
     )
 
     ECHO Renaming installer...
-    MOVE "%WD%\pkg\win32\Output\pgadmin4-setup.exe" "%DISTROOT%\%INSTALLERNAME%" > nul || EXIT /B 1
+    REM Must match OutputBaseFilename in pkg\win32\installer.iss.in
+    MOVE "%WD%\pkg\win32\Output\pgadmink-setup.exe" "%DISTROOT%\%INSTALLERNAME%" > nul || EXIT /B 1
 
     ECHO Location - %DISTROOT%\%INSTALLERNAME%
     ECHO Installer generated successfully.
