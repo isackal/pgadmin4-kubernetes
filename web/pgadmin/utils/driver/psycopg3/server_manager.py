@@ -29,6 +29,8 @@ from pgadmin.utils.exception import ConnectionLost, SSHTunnelConnectionLost,\
 from pgadmin.utils.master_password import get_crypt_key
 from pgadmin.utils.exception import ObjectGone
 from pgadmin.utils.passexec import PasswordExec
+from pgadmin.utils.kubernetes import KubernetesError, PortForwardTunnel, \
+    resolve_reference
 from psycopg.conninfo import make_conninfo
 
 if config.SUPPORT_SSH_TUNNEL:
@@ -53,6 +55,7 @@ class ServerManager(object):
         self.local_bind_port = None
         self.tunnel_object = None
         self.tunnel_created = False
+        self.k8s_tunnel = None
         self.display_connection_string = ''
 
         self.update(server)
@@ -112,6 +115,25 @@ class ServerManager(object):
             self.tunnel_prompt_password = 0
             self.tunnel_password = None
             self.tunnel_keep_alive = 0
+
+        # A Kubernetes connection points at a workload rather than an
+        # endpoint.  `host` holds the local host name the forward is reached
+        # through and `port` the port the service or pod exposes; the local
+        # port is allocated when the forward opens.
+        self.kubernetes_conn = getattr(server, 'kubernetes_conn', 0) or 0
+        self.k8s_context = getattr(server, 'k8s_context', None)
+        self.k8s_namespace = getattr(server, 'k8s_namespace', None)
+        self.k8s_resource_kind = getattr(server, 'k8s_resource_kind', None)
+        self.k8s_resource_name = getattr(server, 'k8s_resource_name', None)
+        self.k8s_username_ref = getattr(server, 'k8s_username_ref', None)
+        self.k8s_password_ref = getattr(server, 'k8s_password_ref', None)
+        self.k8s_database_ref = getattr(server, 'k8s_database_ref', None)
+        # Never persisted; re-read from the cluster on every connect.
+        self.k8s_password = None
+
+        # The workload this manager points at may have just changed, so the
+        # existing forward is no longer the right one.
+        self.stop_kubernetes_tunnel()
 
         self.kerberos_conn = server.kerberos_conn
         self.gss_authenticated = False
@@ -434,6 +456,7 @@ WHERE db.oid = {0}""".format(did))
         """
         if database is None and conn_id is None and did is None:
             self.stop_ssh_tunnel()
+            self.stop_kubernetes_tunnel()
 
     def _check_db_info(self, did, conn_id, database):
         """
@@ -444,6 +467,9 @@ WHERE db.oid = {0}""".format(did))
         """
         if database is None and conn_id is None and did is None:
             self.stop_ssh_tunnel()
+            # Releasing the whole server takes the port forward with it, so
+            # no forward outlives the connection that needed it.
+            self.stop_kubernetes_tunnel()
 
         my_id = None
         if did is not None:
@@ -639,6 +665,90 @@ WHERE db.oid = {0}""".format(did))
             self.tunnel_object = None
             self.tunnel_created = False
 
+    @property
+    def is_tunnelled(self):
+        """True when everything - libpq and the external utilities alike -
+        has to go through the local listener instead of straight to the
+        server's own host and port."""
+        return bool(self.use_ssh_tunnel or self.kubernetes_conn)
+
+    def kubernetes_tunnel_alive(self):
+        """True while the port forward is up and serving."""
+        return self.k8s_tunnel is not None and self.k8s_tunnel.is_alive
+
+    def create_kubernetes_tunnel(self):
+        """Open the port forward and read the credentials off the cluster.
+
+        Both halves are deliberately done together and at connect time: the
+        stored contract only names a workload and some Secret keys, so
+        neither the local port nor the password exist until now.
+
+        :return: (True, None) on success, else (False, error message).
+        """
+        try:
+            username = self._resolve_k8s_reference(self.k8s_username_ref)
+            database = self._resolve_k8s_reference(self.k8s_database_ref)
+            password = self._resolve_k8s_reference(self.k8s_password_ref)
+
+            tunnel = PortForwardTunnel(
+                context=self.k8s_context,
+                namespace=self.k8s_namespace,
+                kind=self.k8s_resource_kind,
+                name=self.k8s_resource_name,
+                port=self.port,
+                host_mode=self.host,
+                logger=current_app.logger,
+            )
+            tunnel.start()
+        except KubernetesError as e:
+            current_app.logger.error(
+                'Kubernetes connection failed for server#{0}: {1}'.format(
+                    self.sid, e))
+            return False, str(e)
+        except Exception as e:
+            current_app.logger.exception(e)
+            return False, gettext(
+                'Failed to open the Kubernetes port forward.\nError: {0}'
+            ).format(str(e))
+
+        self.k8s_tunnel = tunnel
+        self.local_bind_port = tunnel.local_port
+        self.k8s_password = password
+
+        if username:
+            self.user = username
+        if database:
+            self.db = database
+
+        # The port only exists now, so the cached string is stale.
+        self.create_connection_string(self.db, self.user)
+
+        return True, None
+
+    def _resolve_k8s_reference(self, reference):
+        if not reference:
+            return None
+        return resolve_reference(
+            self.k8s_context, self.k8s_namespace, reference)
+
+    def stop_kubernetes_tunnel_if_idle(self):
+        """Drop the forward once nothing is running through it.
+
+        A single connection failing must not pull the forward out from
+        under the other databases open on the same server.
+        """
+        if any(conn.conn is not None for conn in self.connections.values()):
+            return
+        self.stop_kubernetes_tunnel()
+
+    def stop_kubernetes_tunnel(self):
+        """Tear the port forward down; the local port goes with it."""
+        tunnel, self.k8s_tunnel = self.k8s_tunnel, None
+        if tunnel is not None:
+            tunnel.stop()
+            self.local_bind_port = None
+        self.k8s_password = None
+
     def get_connection_param_value(self, param_name):
         """
         This function return the value of param_name if found in the
@@ -655,15 +765,22 @@ WHERE db.oid = {0}""".format(did))
         This function is used to create connection string based on the
         parameters.
         """
+        # Both tunnelling modes replace the endpoint with the local
+        # listener's.  `host` is kept as the user typed or picked it - for
+        # Kubernetes it also names who may reach the forward - while
+        # hostaddr is what libpq actually dials, so a Docker-facing name
+        # that only resolves inside containers still connects from here.
+        is_tunnelled = self.is_tunnelled
+
         dsn_args = dict()
         dsn_args['host'] = self.host
         dsn_args['port'] = \
-            self.local_bind_port if self.use_ssh_tunnel else self.port
+            self.local_bind_port if is_tunnelled else self.port
         dsn_args['dbname'] = database
         dsn_args['user'] = user
         if self.service is not None:
             dsn_args['service'] = self.service
-        if self.use_ssh_tunnel:
+        if is_tunnelled:
             dsn_args['hostaddr'] = self.local_bind_host
 
         # Make a copy to display the connection string on GUI.
@@ -686,8 +803,9 @@ WHERE db.oid = {0}""".format(did))
                     with_complete_path = True
                     value = get_complete_file_path(value)
 
-                # If key is hostaddr and ssh tunnel is in use don't overwrite.
-                if key == 'hostaddr' and self.use_ssh_tunnel:
+                # If key is hostaddr and a tunnel is in use don't overwrite;
+                # it would send libpq past the local listener.
+                if key == 'hostaddr' and is_tunnelled:
                     continue
 
                 # Convert boolean connection parameters to integer for

@@ -106,9 +106,9 @@ class RestoreMessage(IProcessDesc):
             driver = get_driver(PG_DEFAULT_DRIVER)
             manager = driver.connection_manager(self.sid)
 
-            host = manager.local_bind_host if manager.use_ssh_tunnel \
+            host = manager.local_bind_host if manager.is_tunnelled \
                 else s.host
-            port = manager.local_bind_port if manager.use_ssh_tunnel \
+            port = manager.local_bind_port if manager.is_tunnelled \
                 else s.port
 
         return "{0} ({1})".format(
@@ -296,9 +296,9 @@ def get_restore_util_args(data, manager, server, driver, conn, filepath):
     if 'list' in data:
         args.append('--list')
     else:
-        host = manager.local_bind_host if manager.use_ssh_tunnel \
+        host = manager.local_bind_host if manager.is_tunnelled \
             else server.host
-        port = manager.local_bind_port if manager.use_ssh_tunnel \
+        port = manager.local_bind_port if manager.is_tunnelled \
             else server.port
 
         if host:
@@ -384,9 +384,9 @@ def get_sql_util_args(data, manager, server, filepath):
     :return: args list.
     """
     restrict_key = secrets.token_hex(32)
-    host = manager.local_bind_host if manager.use_ssh_tunnel \
+    host = manager.local_bind_host if manager.is_tunnelled \
         else server.host
-    port = manager.local_bind_port if manager.use_ssh_tunnel \
+    port = manager.local_bind_port if manager.is_tunnelled \
         else server.port
     args = [
         '--dbname', data['database'],

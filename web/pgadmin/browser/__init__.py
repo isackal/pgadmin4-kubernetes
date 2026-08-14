@@ -49,6 +49,7 @@ from pgadmin.utils import PgAdminModule
 from pgadmin.utils.ajax import make_json_response, internal_server_error, \
     bad_request
 from pgadmin.utils.csrf import pgCSRFProtect
+from pgadmin.utils.kubernetes import is_kubernetes_supported
 from pgadmin.utils.preferences import Preferences
 from pgadmin.tools.user_management.PgAdminPermissions import \
     AllPermissionTypes
@@ -544,6 +545,7 @@ def utils():
             app_version_int=config.APP_VERSION_INT,
             pg_libpq_version=pg_libpq_version,
             support_ssh_tunnel=config.SUPPORT_SSH_TUNNEL,
+            support_kubernetes=is_kubernetes_supported(),
             logout_url=get_logout_url(),
             platform=sys.platform,
             qt_default_placeholder=QT_DEFAULT_PLACEHOLDER,

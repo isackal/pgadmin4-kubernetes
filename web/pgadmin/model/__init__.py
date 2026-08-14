@@ -34,7 +34,7 @@ import config
 #
 ##########################################################################
 
-SCHEMA_VERSION = 52
+SCHEMA_VERSION = 53
 
 ##########################################################################
 #
@@ -344,6 +344,27 @@ class Server(db.Model, UserScopedMixin):
     )
     tunnel_password = db.Column(PgAdminDbBinaryString())
     tunnel_keep_alive = db.Column(db.Integer(), nullable=True, default=0)
+
+    # Kubernetes connections store a contract rather than an endpoint: which
+    # workload to forward to, and where the credentials live.  The local
+    # port is picked at connection time and never persisted, while `host`
+    # holds the chosen local host name and `port` the port exposed by the
+    # service or pod.
+    kubernetes_conn = db.Column(
+        db.Integer(),
+        db.CheckConstraint('kubernetes_conn >= 0 AND kubernetes_conn <= 1'),
+        nullable=False, default=0
+    )
+    k8s_context = db.Column(db.String(256), nullable=True)
+    k8s_namespace = db.Column(db.String(256), nullable=True)
+    k8s_resource_kind = db.Column(db.String(16), nullable=True)
+    k8s_resource_name = db.Column(db.String(256), nullable=True)
+    # Each of these is a "<secret|configmap>/<name>/<key>" reference that is
+    # read from the cluster every time the server is connected.
+    k8s_username_ref = db.Column(db.String(512), nullable=True)
+    k8s_password_ref = db.Column(db.String(512), nullable=True)
+    k8s_database_ref = db.Column(db.String(512), nullable=True)
+
     shared = db.Column(db.Boolean(), nullable=False)
     shared_username = db.Column(db.String(64), nullable=True)
     kerberos_conn = db.Column(db.Boolean(), nullable=False, default=0)

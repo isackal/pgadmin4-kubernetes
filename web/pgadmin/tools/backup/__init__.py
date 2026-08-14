@@ -130,9 +130,9 @@ class BackupMessage(IProcessDesc):
             driver = get_driver(PG_DEFAULT_DRIVER)
             manager = driver.connection_manager(self.sid)
 
-            host = manager.local_bind_host if manager.use_ssh_tunnel \
+            host = manager.local_bind_host if manager.is_tunnelled \
                 else s.host
-            port = manager.local_bind_port if manager.use_ssh_tunnel \
+            port = manager.local_bind_port if manager.is_tunnelled \
                 else s.port
 
         return "{0} ({1})".format(
@@ -222,7 +222,7 @@ def _get_args_params_values(data, conn, backup_obj_type, backup_file, server,
     driver = get_driver(PG_DEFAULT_DRIVER)
 
     host, port = (manager.local_bind_host, manager.local_bind_port) \
-        if manager.use_ssh_tunnel else (server.host, server.port)
+        if manager.is_tunnelled else (server.host, server.port)
 
     args = ['--file', backup_file]
 

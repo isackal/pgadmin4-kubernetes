@@ -65,8 +65,8 @@ class Message(IProcessDesc):
         driver = get_driver(PG_DEFAULT_DRIVER)
         manager = driver.connection_manager(self.sid)
 
-        host = manager.local_bind_host if manager.use_ssh_tunnel else s.host
-        port = manager.local_bind_port if manager.use_ssh_tunnel else s.port
+        host = manager.local_bind_host if manager.is_tunnelled else s.host
+        port = manager.local_bind_port if manager.is_tunnelled else s.port
 
         return "{0} ({1}:{2})".format(s.name, host, port)
 
@@ -257,9 +257,9 @@ def create_maintenance_job(sid, did):
 
     args = [
         '--host',
-        manager.local_bind_host if manager.use_ssh_tunnel else server.host,
+        manager.local_bind_host if manager.is_tunnelled else server.host,
         '--port',
-        str(manager.local_bind_port) if manager.use_ssh_tunnel
+        str(manager.local_bind_port) if manager.is_tunnelled
         else str(server.port),
         '--username', server.username, '--dbname',
         data['database'],
